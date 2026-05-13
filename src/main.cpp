@@ -9,6 +9,147 @@
 using namespace Rcpp;
 using namespace Eigen;
 
+struct Codebook {
+  int N_bits;
+  std::vector<uint64_t> barcodes;
+  std::vector<string> species;
+};
+
+struct SpotSim {
+  std::vector<uint64_t> barcodes_true;
+  std::vector<uint64_t> barcodes_read; 
+  std::vector<uint64_t> barcodes_corrected;
+  std::vector<int> labels_true;
+  std::vector<int> labels_read;
+  std::vector<int> labels_corrected;
+  std::vector<int> cell_ids;
+};
+
+/*
+ * Next up: remake the set_true_spot_info and generate_simulated_spots functions; 
+ * releated: set_noise_by_flip_rates and set_luminance_noise_correlation_matrix
+ */
+
+uint64_t pack(
+    std::vector<int> bits
+  ) {
+    uint64_t packed = 0;
+    for (int i = 0; i < bits.size(); ++i) {packed |= (uint64_t(bits[i]) << i);} 
+    return packed;
+  }
+
+Codebook pack_codebook(
+    const IntegerMatrix& codebook
+  ) {
+    int N_bits = codebook.ncol();
+    int N_barcodes = codebook.nrow();
+    CharacterVector species = codebook(m);
+    Codebook cb;
+    cb.N_bits = N_bits;
+    cb.barcodes.reserve(N_barcodes);
+    cb.species.reserve(N_barcodes);
+    for (int i = 0; i < N_barcodes; ++i) {
+      std::vector<int> bits(N_bits);
+      for (int j = 0; j < N_bits; ++j) {bits[j] = codebook(i, j);}
+      cb.barcodes.push_back(pack(bits));
+      cb.species.push_back(species[i]);
+    }
+    return cb;
+  }
+
+void generate_neighbors(
+    uint64_t x,
+    int n_bits,
+    int dist,
+    int start_bit,
+    std::vector<uint64_t>& out
+  ) {
+    if (dist == 0) {
+      out.push_back(x);
+      return;
+    }
+    for (int b = start_bit; b < n_bits; ++b) {
+      uint64_t flipped = x ^ (1ULL << b); // Flip bit b
+      generate_neighbors(
+        flipped,
+        n_bits,
+        dist - 1,
+        b + 1,
+        out
+      );
+    }
+  }
+
+std::vector<uint64_t> neighbors(
+    uint64_t x,
+    int n_bits,
+    int hamming_dist
+  ) {
+    std::vector<uint64_t> out;
+    generate_neighbors(
+      x,
+      n_bits,
+      hamming_dist,
+      0,
+      out
+    );
+    return out;
+  }
+
+std::unordered_map<uint64_t, int> build_correction_table(
+    const Codebook& cb,
+    int max_correctable_Hamming_distance
+  ) {
+    std::unordered_map<uint64_t, int> correction_table;
+    for (size_t i = 0; i < cb.barcodes.size(); ++i) {
+      correction_table[cb.barcodes[i]] = i; // Exact match
+      // Generate all barcodes within max_correctable_Hamming_distance
+      for (int d = 1; d <= max_correctable_Hamming_distance; ++d) {
+        std::vector<uint64_t> n = neighbors(cb.barcodes[i], cb.N_bits, d);
+        for (int j = 0; j < n.size(); ++j) {
+          if (correction_table.count(n[j])) {
+            // If this neighbor is already mapped to a different barcode, we have a tie
+            if (correction_table[n[j]] != i) {
+              correction_table[n[j]] = -2; // Mark as ambiguous
+            }
+          } else {
+            correction_table[n[j]] = i; // Map neighbor to original barcode index
+          }
+        }
+      }
+    }
+    return correction_table;
+  }
+
+std::vector<int> decode_spots(
+    std::vector<uint64_t> spots,
+    const std::unordered_map<uint64_t, int>& correction_table
+  ) {
+    std::vector<int>  labels(spots.size());
+    for (int i = 0; i < spots.size(); ++i) {
+      auto it = correction_table.find(spots[i]);
+      if (it == correction_table.end()) {
+        labels[i] = -1; // uncorrectable
+      } else {
+        labels[i] = it->second;
+      }
+    }
+    return labels;
+  }
+
+
+// Hamming distance
+// int dist = __builtin_popcountll(a ^ b);
+
+
+
+
+
+
+
+
+
+
 // [[Rcpp::export]]
 NumericVector find_HD_by_row(
     const NumericMatrix& codebook, 
@@ -80,7 +221,7 @@ NumericMatrix generate_spots_ci(
     NumericMatrix codebook_gen_mat,
     NumericMatrix noise,
     NumericMatrix corr_mat,
-    int ci,
+    int ci, // "ci" = cell index (cell number), used to grab rows from bc_counts
     double threshold,
     bool decode_and_label
   ) {
@@ -234,6 +375,16 @@ NumericVector compute_PPV_fast(
     
     NumericVector PPV_true = as<NumericVector>(successful_decoded_counts) / as<NumericVector>(decoded_counts);
     return PPV_true;
+    
+  }
+
+void run_MCMCSA_cpp(
+  const VectorXi& codebook,
+  const MatrixXd& summary_stats_genes,
+  const MatrixXd& summary_stats_blanks,
+  const MatrixXd& schedules,
+  const VectorXd& initial_state
+  ) {
     
   }
 

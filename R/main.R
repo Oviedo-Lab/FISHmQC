@@ -1139,7 +1139,7 @@ run_simulation <- function(
     
     return(results)
     
- }
+  }
 
 # Estimate FPQC metrics for data using Markov chain Monte Carlo simulated annealing
 run_MCMCSA <- function(
@@ -1257,7 +1257,6 @@ run_MCMCSA <- function(
     cat("\nInitial mse:", round(sim_mse_current, 3))
     
     cat("\n\nRunning Markov chain steps: \n\nRunning initial steps ...")
-    first_step <- TRUE
     maintain_gene_identity <- FALSE
     return_flip_rates <- FALSE
     last_message <- 0
