@@ -63,6 +63,15 @@ struct SpotSim {
   std::vector<int> labels_corrected;
   std::vector<int> cell_ids;
   std::vector<VectorXd> lum;
+  std::vector<double> rate01_pre;
+  std::vector<double> rate10_pre;
+  std::vector<double> rate01_post;
+  std::vector<double> rate10_post;
+  std::vector<int> read_counts;
+  std::vector<int> corrected_counts;
+  std::vector<int> true_counts;
+  std::vector<double> CR;
+  std::vector<double> PPV;
 };
 
 /*
@@ -89,6 +98,51 @@ uint64_t pack_decode_lum(
       packed |= (uint64_t)(lum[i] > 0.0) << i;
     }
     return packed;
+  }
+
+std::pair<std::vector<double>, std::vector<double>> compute_flip_rates(
+    const std::vector<uint64_t>& barcodes_true,
+    const std::vector<uint64_t>& barcodes_read,
+    int N_bits
+  ) {
+    
+    std::vector<uint64_t> n01(N_bits, 0); // 0 -> 1
+    std::vector<uint64_t> n10(N_bits, 0); // 1 -> 0
+    
+    std::vector<uint64_t> denom0(N_bits, 0);
+    std::vector<uint64_t> denom1(N_bits, 0);
+    
+    const size_t N_barcodes = barcodes_true.size();
+    
+    for (size_t i = 0; i < N_barcodes; ++i) {
+      
+      uint64_t t = barcodes_true[i];
+      uint64_t r = barcodes_read[i];
+      uint64_t diff = t ^ r;
+      
+      for (int b = 0; b < N_bits; ++b) {
+        uint64_t mask = 1ULL << b;
+        bool true_bit = t & mask;
+        bool flipped  = diff & mask;
+        if (true_bit) {
+          ++denom1[b];
+          if (flipped) {++n10[b];}
+        } else {
+          ++denom0[b];
+          if (flipped) {++n01[b];}
+        }
+      }
+    }
+    
+    std::vector<double> rate01(N_bits);
+    std::vector<double> rate10(N_bits);
+    
+    for (int b = 0; b < N_bits; ++b) {
+      rate01[b] = denom0[b] > 0 ? double(n01[b]) / denom0[b] : 0.0;
+      rate10[b] = denom1[b] > 0 ? double(n10[b]) / denom1[b] : 0.0;
+    }
+    
+    return {rate01, rate10};
   }
 
 // [[Rcpp::export]]
@@ -162,11 +216,11 @@ SpotSim make_SpotSim(
     sim.cell_ids.reserve(total_spots);
     sim.lum.reserve(total_spots);
     
-    // Compute inverse of flip rates using normal distribution quantiles (inverse CDF)
+    // Compute inverse of flip rates using normal-distribution quantiles (inverse CDF)
     std::vector<double> one_zero_inv(N_bits);
     std::vector<double> zero_one_inv(N_bits);
     for (int b = 0; b < N_bits; ++b) {
-      one_zero_inv[b] = R::qnorm(fr.one_zero[b], 0.0, 1.0, 1, 0); // qnorm(p, mean=0, sd=1, lower_tail=true, log_p=false)
+      one_zero_inv[b] = R::qnorm(fr.one_zero[b], 0.0, 1.0, 1, 0); // qnorm(p, mean = 0, sd = 1, lower_tail = true, log_p = false)
       zero_one_inv[b] = R::qnorm(1 - fr.zero_one[b], 0.0, 1.0, 1, 0); 
     }
     
@@ -188,24 +242,26 @@ SpotSim make_SpotSim(
       }
     }
     
+    // For each barcode ...
     for (int j = 0; j < N_barcodes; j++) {
-      
-      // For each barcode, make spots for all cells in one pass
+      // ... make spots for all cells in one pass
       int count = bc_counts.col(j).sum();
       
       if (count >= 1) {
-        
         // Build noise diagonal matrix
         MatrixXd noise = bit_noise.row(j).asDiagonal();
         
-        // Build noise covariance matrix for this barcode
+        // Build noised covariance matrix for this barcode
         MatrixXd corr_noised = noise * fr.corr * noise; 
         
-        // Sample from multivariate normal 
+        // Sample luminance levels from multivariate normal 
         MatrixXd lum = rmvnorm(count, bit_means.row(j).transpose(), corr_noised);
         
+        // For each cell ...
         for (int i = 0; i < N_cells; ++i) {
-          int bc_count = bc_counts(i, j);
+          
+          // ... simulate the number of spots for this barcode
+          int bc_count = bc_counts(i, j); 
           for (int k = 0; k < bc_count; ++k) {
             
             // Grab spot and decode 
@@ -244,11 +300,43 @@ SpotSim make_SpotSim(
             sim.barcodes_read.push_back(spot_bc);
             sim.barcodes_corrected.push_back(spot_bc_corrected);
           }
-          
         }
-        
       }
     }
+    
+    // Compute flip rates pre- and post-correction
+    std::pair<std::vector<double>, std::vector<double>> fr_pre = compute_flip_rates(sim.barcodes_true, sim.barcodes_read, N_bits);
+    std::pair<std::vector<double>, std::vector<double>> fr_post = compute_flip_rates(sim.barcodes_true, sim.barcodes_corrected, N_bits);
+    sim.rate01_pre = fr_pre.first;
+    sim.rate10_pre = fr_pre.second;
+    sim.rate01_post = fr_post.first;
+    sim.rate10_post = fr_post.second;
+    
+    // Count barcodes
+    std::vector<int> read_counts(N_barcodes, 0);
+    std::vector<int> corrected_counts(N_barcodes, 0);
+    std::vector<int> true_counts(N_barcodes, 0);
+    for (size_t i = 0; i < sim.labels_corrected.size(); ++i) {
+      int dc = sim.labels_read[i];
+      if (dc >= 0) {++read_counts[dc];}
+      int cc = sim.labels_corrected[i];
+      if (cc < 0) {continue;}
+      ++corrected_counts[cc];
+      if (cc == sim.labels_true[i]) {++true_counts[cc];}
+    }
+    sim.read_counts = read_counts;
+    sim.corrected_counts = corrected_counts;
+    sim.true_counts = true_counts;
+    
+    // Compute CR and PPV
+    std::vector<double> CR(N_barcodes, 0.0);
+    std::vector<double> PPV(N_barcodes, 0.0);
+    for (size_t i = 0; i < N_barcodes; ++i) {
+      PPV[i] = corrected_counts[i] > 0 ? double(true_counts[i]) / double(corrected_counts[i]) : 0.0;
+      CR[i] = corrected_counts[i] > 0 ? double(read_counts[i]) / double(corrected_counts[i]) : 0.0;
+    }
+    sim.CR = CR;
+    sim.PPV = PPV;
     
     return sim;
   }
@@ -372,138 +460,6 @@ std::vector<int> decode_spots(
 
 
 
-
-// [[Rcpp::export]]
-NumericVector find_HD_by_row(
-    const NumericMatrix& codebook, 
-    const NumericVector& spot
-  ) {
-    int n = codebook.nrow();
-    NumericVector HD = NumericVector(n);
-    for (int i = 0; i < n; i++) {
-      HD[i] = sum(abs(codebook(i, _) - spot));
-    }
-    return HD;
-  }
-
-// [[Rcpp::export]]
-List find_spot_labels_fast(
-    const IntegerMatrix& codebook, 
-    const IntegerMatrix& spots,
-    const int& max_correctable_Hamming_distance
-  ) {
-    int n_spots = spots.nrow();
-    int n_codes = codebook.nrow();
-    int m = codebook.ncol(); // dimension of each spot/codeword
-    IntegerVector spot_labels(n_spots, NA_INTEGER);
-    IntegerVector spot_labels_uncorrected(n_spots, NA_INTEGER);
-    
-    for (int i = 0; i < n_spots; i++) {
-      int min_HD = m + 1;  // max possible HD is m
-      int min_idx = -1;
-      bool tie = false;
-      
-      for (int j = 0; j < n_codes; j++) {
-        int h = 0;
-        for (int k = 0; k < m; k++) {
-          h += (static_cast<int>(spots(i, k)) != static_cast<int>(codebook(j, k)));
-          if (h > min_HD) break;
-        }
-        if (h < min_HD) {
-          min_HD = h;
-          min_idx = j;
-          tie = false;
-        } else if (h == min_HD) {
-          tie = true;
-        }
-        if (min_HD == 0) {
-          break;
-        }
-      }
-      
-      if (min_HD <= max_correctable_Hamming_distance && !tie) {
-        spot_labels[i] = min_idx + 1; // 1-indexed for R
-        if (min_HD == 0) {
-          spot_labels_uncorrected[i] = min_idx + 1; // 1-indexed for R
-        }
-      }
-      
-    }
-    
-    List spot_labels_list = List::create(
-      Named("spot_labels") = spot_labels,
-      Named("spot_labels_uncorrected") = spot_labels_uncorrected
-    );
-    
-    return spot_labels_list;
-  }
-
-
-// [[Rcpp::export]]
-IntegerVector find_nearby_barcodes_fast(
-  const int& bci,
-  const IntegerMatrix& codebook,
-  const int& max_correctable_Hamming_distance
-  ) {
-    int n_barcodes = codebook.nrow();
-    int n_bits = codebook.ncol(); 
-    IntegerVector barcode = codebook(bci, _);
-    IntegerVector nearby_barcodes;
-    for (int i = 0; i < n_barcodes; i++) {
-      IntegerVector codebook_i = codebook(i, _);
-      int HD = 0;
-      for (int k = 0; k < n_bits; k++) {
-        HD += (static_cast<int>(codebook_i[k]) != static_cast<int>(barcode[k]));
-        if (HD > max_correctable_Hamming_distance) {
-          break; // No need to continue if HD exceeds the limit
-        }
-      }
-      if (HD <= max_correctable_Hamming_distance) {
-        nearby_barcodes.push_back(i + 1); // R is 1-indexed
-      }
-    }
-    return(nearby_barcodes);
-  }
-
-// Function to compute PPV for each barcode
-// ... want to answer the question: for each barcode bc, if a spot is decoded as bc, what is the probability this is correct?
-// [[Rcpp::export]]
-NumericVector compute_PPV_fast(
-    const List& barcodes_by_cell_true_list,
-    const List& spots_bc_labels_list,
-    const int& N_barcodes
-  ) {
-    
-    // Initialize vectors to hold counts 
-    int N_cells = barcodes_by_cell_true_list.size();
-    IntegerVector decoded_counts(N_barcodes, 0);
-    IntegerVector successful_decoded_counts(N_barcodes, 0);
-    
-    for (int ci = 0; ci < N_cells; ci++) {
-      // Get decoded counts and true barcode IDs for this cell
-      IntegerVector true_barcodes_ids = barcodes_by_cell_true_list[ci];
-      IntegerVector decoded_barcode = spots_bc_labels_list[ci];
-      LogicalVector successfully_decoded = !is_na(decoded_barcode);
-      int n_spots = true_barcodes_ids.size();
-      for (int si = 0; si < n_spots; si++) {
-        if (successfully_decoded[si]) {
-          // For this spot, get its true barcode 
-          int true_bc = true_barcodes_ids[si] - 1; // R is 1-indexed, convert to 0-indexed
-          // Get the decoded barcode
-          int this_read = decoded_barcode[si] - 1; // R is 1-indexed, convert to 0-indexed
-          // Increment the counts
-          decoded_counts[this_read]++;
-          if (this_read == true_bc) {
-            successful_decoded_counts[this_read]++;
-          }
-        }
-      }
-    }
-    
-    NumericVector PPV_true = as<NumericVector>(successful_decoded_counts) / as<NumericVector>(decoded_counts);
-    return PPV_true;
-    
-  }
 
 void run_MCMCSA_cpp(
   const VectorXi& codebook,
