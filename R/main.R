@@ -482,7 +482,7 @@ run_simulation <- function(
     bit_lum_noise_correlations = NULL,      # For stipulating correlations between bits (bit bias and sd will be ignored)
     N_cells = 1e3,                          # Number of cells to simulate
     blank_weight = 1,
-    maintain_gene_identity = TRUE,
+    maintain_gene_identity = TRUE, ## actual sampling (and burn-in) done with this set to "TRUE"; only the initial fr search steps use "FALSE". 
     return_flip_rates = FALSE,
     verbose = FALSE
   ) {

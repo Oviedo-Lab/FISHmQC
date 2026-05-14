@@ -4,16 +4,55 @@
 // [[Rcpp::depends(RcppEigen)]]
 #include <Rcpp.h>
 #include <RcppEigen.h>
+#include <random>
 #include <nlopt.hpp>
 #include <boost/math/distributions/normal.hpp>
 using namespace Rcpp;
 using namespace Eigen;
+
+MatrixXd rmvnorm(
+    int n,
+    const VectorXd& mu,
+    const MatrixXd& Sigma
+  ) {
+    int d = mu.size();
+    
+    // Cholesky decomposition
+    Eigen::LLT<MatrixXd> llt(Sigma);
+    MatrixXd L = llt.matrixL();
+    
+    // RNG
+    std::mt19937 rng(std::random_device{}());
+    std::normal_distribution<double> norm(0.0, 1.0);
+    
+    // Standard normal samples
+    MatrixXd Z(n, d);
+    
+    for (int i = 0; i < n; ++i) {
+      for (int j = 0; j < d; ++j) {
+        Z(i, j) = norm(rng);
+      }
+    }
+    
+    // Correlate + shift mean
+    MatrixXd X =
+      (Z * L.transpose()).rowwise() +
+      mu.transpose();
+    
+    return X;
+  }
 
 struct Codebook {
   int N_bits;
   std::vector<uint64_t> barcodes;
   std::vector<string> species;
 };
+
+struct FlipRates {
+  std::vector<double> one_zero; // P(1 -> 0) for each bit, so length = N_bits
+  std::vector<double> zero_one; // P(0 -> 1) for each bit, so length = N_bits
+  MatrixXd corr; // N_bits x N_bits matrix of luminance noise correlations between bits
+}; 
 
 struct SpotSim {
   std::vector<uint64_t> barcodes_true;
@@ -23,12 +62,196 @@ struct SpotSim {
   std::vector<int> labels_read;
   std::vector<int> labels_corrected;
   std::vector<int> cell_ids;
+  std::vector<VectorXd> lum;
 };
 
 /*
  * Next up: remake the set_true_spot_info and generate_simulated_spots functions; 
- * releated: set_noise_by_flip_rates and set_luminance_noise_correlation_matrix
+ *  ... done. set_true_spot_info is now make_true_bc_counts, and generate_simulated_spots is now make_SpotSim.
+ *  ... eliminated use of MASS? 
+ * releated: \set_luminance_noise_correlation_matrix
  */
+
+std::vector<int> decode_lum(
+    const VectorXd& x
+  ) {
+    const int n = x.size();
+    std::vector<int> y(n);
+    for (int i = 0; i < n; ++i) {y[i] = (x[i] > 0.0);}
+    return y;
+  }
+
+uint64_t pack_decode_lum(
+    const VectorXd& lum
+  ) {
+    uint64_t packed = 0ULL;
+    for (int i = 0; i < lum.size(); ++i) {
+      packed |= (uint64_t)(lum[i] > 0.0) << i;
+    }
+    return packed;
+  }
+
+// [[Rcpp::export]]
+MatrixXi make_true_bc_counts(
+    const ArrayXd& gene_kernel_rates, // 1 D vector, of length N_genes, from empirical observations
+    const ArrayXd& gamma_variance, // 1 D vector, length N_genes, from empirical observations 
+    const std::vector<int> gene_cols,
+    int N_barcodes,
+    int N_cells
+  ) {
+    
+    int N_genes = gene_cols.size();
+    
+    // Convert mean/variance -> gamma params
+    ArrayXd gamma_rt = gene_kernel_rates / gamma_variance;
+    ArrayXd gamma_sp = gene_kernel_rates.square() / gamma_variance;
+    
+    // Output matrix
+    MatrixXi barcode_counts_true = MatrixXi::Zero(N_cells, N_barcodes);
+    
+    // RNG
+    std::mt19937 rng(std::random_device{}());
+    
+    // Precompute gamma distributions
+    std::vector<std::gamma_distribution<double>> gamma_dists;
+    gamma_dists.reserve(N_genes);
+    for (int g = 0; g < N_genes; ++g) {
+      gamma_dists.emplace_back(
+        gamma_sp[g],          // shape
+        1.0 / gamma_rt[g]     // scale = 1/rate
+      );
+    }
+    
+    // Simulate counts
+    for (int cell = 0; cell < N_cells; ++cell) {
+      for (int g = 0; g < N_genes; ++g) {
+        // Gamma-Poisson draw
+        double lambda = gamma_dists[g](rng);
+        std::poisson_distribution<int> pois(lambda);
+        barcode_counts_true(cell, gene_cols[g]) = pois(rng);
+      }
+    }
+    
+    return barcode_counts_true;
+  }
+
+// [[Rcpp::export]]
+SpotSim make_SpotSim(
+    const MatrixXi& bc_counts, // random draw seeded by empirical observation, e.g., a MERFISH run
+    const Codebook& cb, 
+    const FlipRates& fr, 
+    const std::unordered_map<uint64_t, int>& correction_table
+  ) {
+    
+    // Collect basic information
+    int total_spots = bc_counts.sum();
+    int N_barcodes = bc_counts.ncol();
+    int N_cells = bc_counts.nrow();
+    int N_bits = cb.N_bits;
+    
+    // Initialize spot sim
+    SpotSim sim;
+    
+    // Reserve space for barcodes and labels
+    sim.barcodes_true.reserve(total_spots);
+    sim.barcodes_read.reserve(total_spots);
+    sim.barcodes_corrected.reserve(total_spots);
+    sim.labels_true.reserve(total_spots);
+    sim.labels_read.reserve(total_spots);
+    sim.labels_corrected.reserve(total_spots);
+    sim.cell_ids.reserve(total_spots);
+    sim.lum.reserve(total_spots);
+    
+    // Compute inverse of flip rates using normal distribution quantiles (inverse CDF)
+    std::vector<double> one_zero_inv(N_bits);
+    std::vector<double> zero_one_inv(N_bits);
+    for (int b = 0; b < N_bits; ++b) {
+      one_zero_inv[b] = R::qnorm(fr.one_zero[b], 0.0, 1.0, 1, 0); // qnorm(p, mean=0, sd=1, lower_tail=true, log_p=false)
+      zero_one_inv[b] = R::qnorm(1 - fr.zero_one[b], 0.0, 1.0, 1, 0); 
+    }
+    
+    // Set bit means and noise by barcode
+    MatrixXd bit_means(N_barcodes, N_bits); // Make RowMajor?
+    MatrixXd bit_noise(N_barcodes, N_bits);
+    for (int i = 0; i < N_barcodes; ++i) {
+      for (int b = 0; b < N_bits; ++b) {
+        // Extract bit
+        int bit = (cb.barcodes[i] >> b) & 1ULL;
+        // Convert: 0 -> -1, 1 ->  1
+        double m = (double)bit * 2.0 - 1.0;
+        bit_means(i, b) = m;
+        if (bit == 1) {
+          bit_noise(i, b) = -m / one_zero_inv[b];
+        } else {
+          bit_noise(i, b) = -m / zero_one_inv[b];
+        }
+      }
+    }
+    
+    for (int j = 0; j < N_barcodes; j++) {
+      
+      // For each barcode, make spots for all cells in one pass
+      int count = bc_counts.col(j).sum();
+      
+      if (count >= 1) {
+        
+        // Build noise diagonal matrix
+        MatrixXd noise = bit_noise.row(j).asDiagonal();
+        
+        // Build noise covariance matrix for this barcode
+        MatrixXd corr_noised = noise * fr.corr * noise; 
+        
+        // Sample from multivariate normal 
+        MatrixXd lum = rmvnorm(count, bit_means.row(j).transpose(), corr_noised);
+        
+        for (int i = 0; i < N_cells; ++i) {
+          int bc_count = bc_counts(i, j);
+          for (int k = 0; k < bc_count; ++k) {
+            
+            // Grab spot and decode 
+            VectorXd spot = lum.row(i*bc_count + k).transpose();
+            uint64_t spot_bc = pack_decode_lum(spot);
+            uint64_t spot_bc_corrected = spot_bc;
+            int label_corrected;
+            int label_read = -1;
+            
+            // Correct decoding
+            auto it = correction_table.find(spot_bc);
+            if (it == correction_table.end()) {
+              label_corrected = -1; // uncorrectable
+            } else {
+              label_corrected = it->second;
+            }
+            
+            if (label_corrected >= 0) {
+              spot_bc_corrected = cb.barcodes[label_corrected];
+              if (spot_bc_corrected == spot_bc) {
+                label_read = label_corrected;
+              }
+            }
+            
+            // Save cell ID and spot-luminance information
+            sim.cell_ids.push_back(i);
+            sim.lum.push_back(spot);
+            
+            // Save labels 
+            sim.labels_true.push_back(j);
+            sim.labels_read.push_back(label_read);
+            sim.labels_corrected.push_back(label_corrected);
+            
+            // Savd barcodes
+            sim.barcodes_true.push_back(cb.barcodes[j]);
+            sim.barcodes_read.push_back(spot_bc);
+            sim.barcodes_corrected.push_back(spot_bc_corrected);
+          }
+          
+        }
+        
+      }
+    }
+    
+    return sim;
+  }
 
 uint64_t pack(
     std::vector<int> bits
@@ -215,102 +438,6 @@ List find_spot_labels_fast(
     return spot_labels_list;
   }
 
-// [[Rcpp::export]]
-NumericMatrix generate_spots_ci(
-    IntegerMatrix bc_counts,
-    NumericMatrix codebook_gen_mat,
-    NumericMatrix noise,
-    NumericMatrix corr_mat,
-    int ci, // "ci" = cell index (cell number), used to grab rows from bc_counts
-    double threshold,
-    bool decode_and_label
-  ) {
-    int N_barcodes = bc_counts.ncol();
-    int N_bits = codebook_gen_mat.ncol();
-    
-    int total_spots = 0;
-    for (int j = 0; j < N_barcodes; j++) {
-      total_spots += bc_counts(ci, j);
-    }
-    
-    NumericMatrix spots_ci(total_spots, N_bits);
-    std::fill(spots_ci.begin(), spots_ci.end(), NA_REAL);
-    
-    int end_row = 0;
-    
-    Environment MASS("package:MASS");
-    Function mvrnorm = MASS["mvrnorm"];
-    
-    for (int bci = 0; bci < N_barcodes; bci++) {
-      int count = bc_counts(ci, bci);
-      end_row += count;
-      int start_row = end_row - count;
-      
-      if (count >= 1) {
-        // Get this barcode's mean vector
-        NumericVector this_bc(N_bits);
-        for (int k = 0; k < N_bits; k++) {
-          this_bc[k] = codebook_gen_mat(bci, k);
-        }
-        
-        // Build noise diagonal matrix
-        NumericMatrix noise_matrix(N_bits, N_bits);
-        for (int i = 0; i < N_bits; i++) {
-          for (int j = 0; j < N_bits; j++) {
-            if (i == j) {
-              noise_matrix(i, j) = noise(bci, i);
-            } else {
-              noise_matrix(i, j) = 0.0;
-            }
-          }
-        }
-        
-        // Sigma_noised = noise_matrix %*% corr_mat %*% noise_matrix
-        NumericMatrix temp_sigma(N_bits, N_bits);
-        for (int i = 0; i < N_bits; i++) {
-          for (int j = 0; j < N_bits; j++) {
-            double sum = 0.0;
-            for (int k = 0; k < N_bits; k++) {
-              sum += noise_matrix(i, k) * corr_mat(k, j);
-            }
-            temp_sigma(i, j) = sum;
-          }
-        }
-        
-        NumericMatrix Sigma_noised(N_bits, N_bits);
-        for (int i = 0; i < N_bits; i++) {
-          for (int j = 0; j < N_bits; j++) {
-            double sum = 0.0;
-            for (int k = 0; k < N_bits; k++) {
-              sum += temp_sigma(i, k) * noise_matrix(k, j);
-            }
-            Sigma_noised(i, j) = sum;
-          }
-        }
-        
-        // Sample from multivariate normal using MASS::mvrnorm
-        NumericMatrix spot_seeds(count, N_bits);
-        if (count > 1) {
-          spot_seeds = mvrnorm(count, this_bc, Sigma_noised);
-        } else {
-          spot_seeds.row(0) = Rcpp::as<NumericVector>(mvrnorm(count, this_bc, Sigma_noised));
-        }
-        
-        for (int row = 0; row < count; row++) {
-          for (int col = 0; col < N_bits; col++) {
-            double val = spot_seeds(row, col);
-            if (decode_and_label) {
-              spots_ci(start_row + row, col) = (val > threshold) ? 1.0 : 0.0;
-            } else {
-              spots_ci(start_row + row, col) = val;
-            }
-          }
-        }
-      }
-    }
-    
-    return spots_ci;
-  }
 
 // [[Rcpp::export]]
 IntegerVector find_nearby_barcodes_fast(
