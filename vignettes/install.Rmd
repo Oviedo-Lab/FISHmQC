@@ -1,0 +1,27 @@
+---
+title: "Installation instructions"
+author: "Michael Barkasi"
+date: "`r Sys.Date()`"
+---
+
+1. Clone and `cd` into this git repo
+2. Make `build_install.sh` executable by running `chmod +x build_install.sh` in bash terminal  
+3. In terminal, run `./build_install.sh` to build and install the package  
+4. To ensure a clean start, run:  
+
+```bash
+rm -f src/*.o src/*.so
+rm -rf FISHmQC.Rcheck
+rm -f FISHmQC_*.tar.gz
+./build_install.sh
+```
+
+## Build documentation
+
+In R, run:  
+
+```{r, eval = FALSE}
+devtools::document()
+pkgdown::build_site()
+pkgdown::build_article("<article name>")
+```

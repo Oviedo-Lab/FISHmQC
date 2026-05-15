@@ -2,7 +2,7 @@
 # Function to load summary stats
 summary_stats <- function(
     id,
-    path = summary_stat_folder
+    path
   ) {
     # id = m1_blanks, m1_genes, m2_blanks, etc ...
     pattern_var <- paste0(id, ".*\\.csv$")
