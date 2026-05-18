@@ -11,22 +11,22 @@ Rcpp::Rostream<true>&  Rcpp::Rcout = Rcpp::Rcpp_cout_get();
 Rcpp::Rostream<false>& Rcpp::Rcerr = Rcpp::Rcpp_cerr_get();
 #endif
 
-// estimate_flip_rates_initial_R
-List estimate_flip_rates_initial_R(NumericVector bc_countsR, IntegerMatrix codebook, int max_correctable_Hamming_distance);
-RcppExport SEXP _FISHmQC_estimate_flip_rates_initial_R(SEXP bc_countsRSEXP, SEXP codebookSEXP, SEXP max_correctable_Hamming_distanceSEXP) {
+// mQC
+List mQC(NumericVector bc_counts, IntegerMatrix codebook, int max_correctable_Hamming_distance);
+RcppExport SEXP _FISHmQC_mQC(SEXP bc_countsSEXP, SEXP codebookSEXP, SEXP max_correctable_Hamming_distanceSEXP) {
 BEGIN_RCPP
     Rcpp::RObject rcpp_result_gen;
     Rcpp::RNGScope rcpp_rngScope_gen;
-    Rcpp::traits::input_parameter< NumericVector >::type bc_countsR(bc_countsRSEXP);
+    Rcpp::traits::input_parameter< NumericVector >::type bc_counts(bc_countsSEXP);
     Rcpp::traits::input_parameter< IntegerMatrix >::type codebook(codebookSEXP);
     Rcpp::traits::input_parameter< int >::type max_correctable_Hamming_distance(max_correctable_Hamming_distanceSEXP);
-    rcpp_result_gen = Rcpp::wrap(estimate_flip_rates_initial_R(bc_countsR, codebook, max_correctable_Hamming_distance));
+    rcpp_result_gen = Rcpp::wrap(mQC(bc_counts, codebook, max_correctable_Hamming_distance));
     return rcpp_result_gen;
 END_RCPP
 }
 
 static const R_CallMethodDef CallEntries[] = {
-    {"_FISHmQC_estimate_flip_rates_initial_R", (DL_FUNC) &_FISHmQC_estimate_flip_rates_initial_R, 3},
+    {"_FISHmQC_mQC", (DL_FUNC) &_FISHmQC_mQC, 3},
     {NULL, NULL, 0}
 };
 

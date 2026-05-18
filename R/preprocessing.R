@@ -18,42 +18,24 @@ summary_stats <- function(
 # This function can be used to extract summary statistics from your own data
 # ...  it will return a list holding two data.frames formatted like those imported below from the csv files
 summary_stats_from_data <- function(
-    obs_data,         # data frame, columns as barcodes (genes or blanks), rows as cells, elements as spot counts
-    blank_mask,       # logical vector with length equal to number of columns in obs_data, TRUE for blank barcodes, FALSE for gene barcodes
-    cell_mask = TRUE  # optional row mask, logical vector with length equal to the number of rows in obs_data, rows marked FALSE will be discarded
+    obs_data         # data frame, columns as barcodes (genes or blanks), rows as cells, elements as spot counts
   ) {
     
-    # Parse provided data
-    obs_data_genes <- obs_data[cell_mask, !blank_mask]
-    obs_data_blanks <- obs_data[cell_mask, blank_mask]
-   
     # Extract summary statistics
-    observed_gene_rates <- colMeans(obs_data_genes)
-    observed_blank_rates <- colMeans(obs_data_blanks)
-    observed_gene_variance <- rep(NA, length(observed_gene_rates))
-    observed_blank_variance <- rep(NA, length(observed_blank_rates))
-    for (i in 1:length(observed_gene_variance)) {observed_gene_variance[i] <- sd(obs_data_genes[,i])^2}
-    for (i in 1:length(observed_blank_variance)) {observed_blank_variance[i] <- sd(obs_data_blanks[,i])^2}
-    observed_gene_counts <- colSums(obs_data_genes)
-    observed_blank_counts <- colSums(obs_data_blanks)
+    observed_rates <- colMeans(obs_data)
+    observed_variance <- rep(NA, length(observed_rates))
+    for (i in 1:length(observed_variance)) {observed_variance[i] <- sd(obs_data[,i])^2}
+    observed_counts <- colSums(obs_data)
     
     # Collect summary stats
-    gene_data <- data.frame(
-      rates = observed_gene_rates,
-      variance = observed_gene_variance,
-      counts = observed_gene_counts
+    data <- data.frame(
+      rates = observed_rates,
+      variance = observed_variance,
+      counts = observed_counts
     )
-    rownames(gene_data) <- colnames(obs_data_genes)
-    blank_data <- data.frame(
-      rates = observed_blank_rates,
-      variance = observed_blank_variance,
-      counts = observed_blank_counts
-    )
-    rownames(blank_data) <- colnames(obs_data_blanks)
+    rownames(data) <- colnames(obs_data)
     
-    return(
-      list(gene = gene_data, blank = blank_data)
-    )
+    return(data)
     
   }
 

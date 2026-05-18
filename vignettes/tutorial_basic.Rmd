@@ -1,0 +1,102 @@
+---
+title: "Basic demo"
+author: "Michael Barkasi"
+date: '`r Sys.Date()`'
+---
+
+```{r setup, include = FALSE}
+options(width = 10000)
+knitr::opts_chunk$set(class.output = "scroll-output", cache = TRUE)
+library(FISHmQC)
+```
+
+## Introduction 
+
+Grab MERSCOPE codebook. Must have row names in the first column giving species names. 
+
+```{r get_codebook}
+codebook <- read.csv("/Users/michaelbarkasi/projects_Oviedo_lab/R_packages/FISHmQC/inst/extdata/codebook_obs.csv", row.names = 1)
+```
+
+Some text here. 
+
+```{r set_max_Hamming}
+max_correctable_Hamming_distance <- 4
+```
+
+Get summary stats 
+
+
+```{r make_count_data, eval = FALSE}
+data_path_cells <- "/Users/michaelbarkasi/projects_Oviedo_lab/_molecular_mechanisms_of_ACx_lateralization/data_ACx_cells"
+count_data <- wispack::make_count_data(
+  data_path = data_path_cells, 
+  remove_L1 = FALSE, 
+  ROI_only = FALSE,
+  raw = TRUE,
+  drop_blanks = FALSE,
+  verbose = TRUE
+)
+count_data <- count_data$count_data
+```
+
+Now make summary stats, for each mouse 
+
+```{r summary_stats, eval = FALSE}
+mice <- unique(count_data$mouse)
+mice_masks <- lapply(mice, function(m) count_data$mouse == m)
+count_data <- count_data[,13:(ncol(count_data)-6)]
+summary_stats_data <- data.frame(mouse = c(), rates = c(), variance = c(), counts = c())
+for (i in seq_along(mice_masks)) {
+  ss <- summary_stats_from_data(count_data[mice_masks[[i]],])
+  ss <- cbind(mouse = i, ss)
+  summary_stats_data <- rbind(summary_stats_data, ss)
+}
+write.csv(
+  summary_stats_data,
+  file = "/Users/michaelbarkasi/projects_Oviedo_lab/R_packages/FISHmQC/inst/extdata/summary_stats_all_mice.csv",
+  row.names = TRUE
+)
+```
+
+```{r align_names}
+summary_stats_data <- read.csv("/Users/michaelbarkasi/projects_Oviedo_lab/R_packages/FISHmQC/inst/extdata/summary_stats_all_mice.csv", row.names = 1)
+m1_summary_stats <- summary_stats_data[summary_stats_data$mouse == 1,]
+
+species_names <- rownames(m1_summary_stats)
+rownames(codebook) <- gsub("-", ".", rownames(codebook))
+codebook <- codebook[species_names,]
+blank_mask <- grepl("Blank", species_names)
+gene_rate_order <- order(m1_summary_stats$rates[!blank_mask], decreasing = TRUE)
+blank_rate_order <- order(m1_summary_stats$rates[blank_mask], decreasing = TRUE)
+m1_summary_stats <- rbind(
+  m1_summary_stats[!blank_mask,][gene_rate_order,],
+  m1_summary_stats[blank_mask,][blank_rate_order,]
+)
+codebook <- rbind(
+  codebook[!blank_mask,][gene_rate_order,],
+  codebook[blank_mask,][blank_rate_order,]
+)
+plot(m1_summary_stats$rates)
+```
+
+Now try new function. 
+
+```{r new_initial_estimate}
+bc_counts <- m1_summary_stats$counts
+names(bc_counts) <- rownames(m1_summary_stats)
+cb <- as.matrix(codebook)
+test_results <- mQC(bc_counts, cb, max_correctable_Hamming_distance)
+```
+
+```{r plot_results}
+plot_df <- data.frame(observed = test_results$counts_provided, predicted = test_results$counts_expected_initial, bc = seq_along(bc_counts))
+ggplot(plot_df, aes(x = bc)) + 
+  geom_point(aes(y = observed), color = "blue") + 
+  geom_point(aes(y = predicted), color = "red") + 
+  theme_minimal() + 
+  scale_y_log10() +
+  labs(title = "Observed vs Predicted Counts", x = "Barcode Index", y = "Counts") + 
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+
+```

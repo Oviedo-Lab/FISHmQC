@@ -19,6 +19,7 @@ struct Codebook {
 struct ST_data {
   std::vector<int> bc_counts; // Vector of length N_barcodes, giving total counts for each barcode across all cells
   Codebook cb;
+  std::unordered_map<uint64_t, int> correction_table;
   std::unordered_map<int, std::vector<uint64_t>> correction_table_inverted;
   Eigen::Matrix<uint64_t, Dynamic, Dynamic> transform_flips_all;
 };
@@ -93,26 +94,25 @@ std::vector<int> grep_idx(
     return idx;
   } 
 
-
 /*
  * Functions to analytically compute expected count read from flip rates and true counts
  */
 
 // Hold and flip rates by bit
-double H(int bit, double rate10, double rate01) {return 1.0 - rate01 + bit * (rate01 - rate10);}
-double F(int bit, double rate10, double rate01) {return rate01 + bit * (rate10 - rate01);}
+double H(const int bit, const double rate10, const double rate01) {return 1.0 - rate01 + (double)bit * (rate01 - rate10);}
+double F(const int bit, const double rate10, const double rate01) {return rate01 + (double)bit * (rate10 - rate01);}
 double TR(
-    uint64_t bc,
-    uint64_t transform_flips,
-    std::vector<double> rate10,
-    std::vector<double> rate01
+    const uint64_t bc,
+    const uint64_t transform_flips,
+    const std::vector<double>& rate10,
+    const std::vector<double>& rate01
   ) {
     double transform_rate = 1.0;
     for (int b = 0; b < rate10.size(); ++b) {
       int bit = (bc >> b) & 1ULL;
       int flip = (transform_flips >> b) & 1ULL;
       double h = H(bit, rate10[b], rate01[b]);
-      transform_rate *= h + flip * (F(bit, rate10[b], rate01[b]) - h);
+      transform_rate *= h + (double)flip * (F(bit, rate10[b], rate01[b]) - h);
     }
     return transform_rate; 
   }
@@ -127,10 +127,27 @@ Eigen::Matrix<uint64_t, Dynamic, Dynamic> find_transform_flips_all(
     Eigen::Matrix<uint64_t, Dynamic, Dynamic> T(N_barcodes, N_barcodes);
     for (int j = 0; j < N_barcodes; ++j) {
       for (int i = j; i < N_barcodes; ++i) {
-        T(i, j) = (barcodes[i] ^ barcodes[j]) & ((1ULL << N_bits) - 1);
-      }
+        uint64_t flips = (barcodes[i] ^ barcodes[j]) & ((1ULL << N_bits) - 1);
+        T(i, j) = flips;
+        T(j, i) = flips;
+      } 
     }
     return T;
+  }
+
+std::vector<uint64_t> find_transform_flips(
+    std::vector<uint64_t> barcodes, // Possible true barcodes (e.g., from codebook)
+    uint64_t observed_barcode, // A single observed barcode (e.g., from a spot)
+    int N_bits
+  ) { 
+    int N_barcodes = barcodes.size();
+    std::vector<uint64_t>  T;
+    T.reserve(N_barcodes);
+    for (int i = 0; i < N_barcodes; ++i) {
+      uint64_t flips = (barcodes[i] ^ observed_barcode) & ((1ULL << N_bits) - 1);
+      T.push_back(flips);
+    }
+    return T; // For each possible true barcode, the misread flips which would turn it into observed_barcode
   }
 
 // Number of B correctly read
@@ -167,28 +184,11 @@ double expected_misreads(
       // Get flips needed to transform bct into bc 
       uint64_t flips = transform_flips_all(i, k);
       // Find transform rate, assuming independent bit flips, so multiply across bits
-      double transform_rate = TR(bct, flips, rate10, rate01);
+      double transform_rate = TR(bct, flips, rate10, rate01); // PROBLEM: the flips for this i might be incompatible with the flips from a previous i
       misread_count += transform_rate * (double)bc_counts_true[i];
     }
     return misread_count;
   }
-
-
-std::vector<uint64_t> find_transform_flips(
-    std::vector<uint64_t> barcodes, // Possible true barcodes (e.g., from codebook)
-    uint64_t observed_barcode, // A single observed barcode (e.g., from a spot)
-    int N_bits
-  ) {
-    int N_barcodes = barcodes.size();
-    std::vector<uint64_t>  T;
-    T.reserve(N_barcodes);
-    for (int i = 0; i < N_barcodes; ++i) {
-      uint64_t flips = (barcodes[i] ^ observed_barcode) & ((1ULL << N_bits) - 1);
-      T.push_back(flips);
-    }
-    return T; // For each possible true barcode, the misread flips which would turn it into observed_barcode
-  }
-  
 
 // Number of B' incorrectly read as something corrected to B
 double expected_miscorrections(
@@ -204,15 +204,15 @@ double expected_miscorrections(
     // For each possible barcode misread that would be corrected to the barcode indexed by k ...
     for (uint64_t bcr : corrected_to_k) {
       // Get bit-flips required to transform each true barcode into this misread barcode
-      std::vector<uint64_t> transform_flips = find_transform_flips(true_barcodes, bcr, N_bits);
+      std::vector<uint64_t> transform_flips = find_transform_flips(true_barcodes, bcr, N_bits); // Precomputing this step not worth the memory (tried it!!)
       for (int i = 0; i < true_barcodes.size(); ++i) {
         if (i == k) {continue;} // Skip true barcode, since we want misreads
-        // Get bar code of interest
+        // Get barcode of interest
         uint64_t bct = true_barcodes[i];
         // Get flips needed to transform bct into bcr 
         uint64_t flips = transform_flips[i];
         // Find transform rate, assuming independent bit flips, so multiply across bits
-        double transform_rate = TR(bct, flips, rate10, rate01);
+        double transform_rate = TR(bct, flips, rate10, rate01); // PROBLEM: Same as above; flips will be incompatable. 
         // Find expected count of spot misreads corrected to barcode k, from true barcode i, and add to total misread count
         misread_count += transform_rate * (double)bc_counts_true[i];
       }
@@ -290,6 +290,8 @@ double observed_counts_nll(
       nll += lambda - k * std::log(lambda) + std::lgamma(k + 1); // Poisson negative log likelihood
     }
     
+    Rcpp::Rcout << "nll: " << nll << std::endl;
+    
     // ... and return
     return nll;
   }
@@ -298,8 +300,10 @@ double observed_counts_nll(
 std::pair<std::vector<double>, std::vector<double>> estimate_flip_rates_initial(
     ST_data& STdata,
     double ctol = 1e-7,
-    int max_evals = 1000
+    int max_evals = 10
   ) {
+    
+    Rcpp::Rcout << "Making initial flip-rate estimate..." << std::endl;
    
     // Initialize rate10 and rate01 with some reasonable starting values, e.g., 0.01 for all bits
     int N_bits = STdata.cb.N_bits; 
@@ -722,45 +726,71 @@ std::vector<int> decode_spots(
     return labels;
   }
 
-
 // Hamming distance
 // int dist = __builtin_popcountll(a ^ b);
 
-
-
 ST_data load_STdata(
-    NumericVector bc_countsR,
+    NumericVector bc_counts_,
     IntegerMatrix codebook,
     int max_correctable_Hamming_distance
   ) {
     
+    Rcpp::Rcout << "\nLoading data..." << std::endl;
     Codebook cb = pack_codebook(codebook);
+    Rcpp::Rcout << "Codebook loaded: " << cb.barcodes.size() << " barcodes, " << cb.N_bits << " bits, " << cb.blanks.size() << " blanks." << std::endl;
     
-    int N_barcodes = bc_countsR.size();
+    int N_barcodes = bc_counts_.size();
     std::vector<int> bc_counts;
     bc_counts.reserve(N_barcodes);
     for (int i = 0; i < N_barcodes; ++i) {
-      bc_counts.push_back((int)bc_countsR[i]);
+      bc_counts.push_back((int)bc_counts_[i]);
     }
+    Rcpp::Rcout << "Barcode counts loaded: " << bc_counts.size() << " barcodes." << std::endl;
     
     std::unordered_map<uint64_t, int> correction_table = build_correction_table(cb, max_correctable_Hamming_distance);
+    Rcpp::Rcout << "Correction table built with max Hamming distance " << max_correctable_Hamming_distance << "." << std::endl;
+    Rcpp::Rcout << "Correction table size: " << correction_table.size() << " entries." << std::endl;
     std::unordered_map<int, std::vector<uint64_t>> correction_table_inverted = invert_lookup_table(correction_table);
+    Rcpp::Rcout << "Correction table inverted." << std::endl;
     
     Eigen::Matrix<uint64_t, Dynamic, Dynamic> transform_flips_all = find_transform_flips_all(cb.barcodes, cb.N_bits);
+    Rcpp::Rcout << "Transform flips matrix computed." << std::endl;
     
-    return {bc_counts, cb, correction_table_inverted, transform_flips_all};
+    Rcpp::Rcout << "Data loading complete.\n" << std::endl;
+    return {bc_counts, cb, correction_table, correction_table_inverted, transform_flips_all};
     
   }
 
 // [[Rcpp::export]]
-List estimate_flip_rates_initial_R( 
-    NumericVector bc_countsR,
+List mQC( 
+    NumericVector bc_counts,
     IntegerMatrix codebook,
     int max_correctable_Hamming_distance
   ) {
-    auto STdata = load_STdata(bc_countsR, codebook, max_correctable_Hamming_distance);
+    
+    // Load in data
+    auto STdata = load_STdata(bc_counts, codebook, max_correctable_Hamming_distance);
+   
+    // Make initial estimate of flip rates, assuming no correlations or over-dispersion, to use as starting point for DG simulations
     auto flip_rates = estimate_flip_rates_initial(STdata);
+    
+    // Compute final predicted rates based on initial estimate
+    // ... set blanks to zero to approximate true barcodes
+    std::vector<int> bc_counts_true = STdata.bc_counts; 
+    for (int idx : STdata.cb.blanks) {bc_counts_true[idx] = 0;}
+    // ... compute expected corrected counts from these flip rates
+    std::vector<double> ecc = expected_corrected_counts(
+      flip_rates.first,
+      flip_rates.second, 
+      bc_counts_true, 
+      STdata.cb.barcodes, 
+      STdata.correction_table_inverted, 
+      STdata.transform_flips_all
+    );
+    
     return List::create(
+      _["counts_provided"] = bc_counts,
+      _["counts_expected_initial"] = ecc,
       _["rate10"] = flip_rates.first,
       _["rate01"] = flip_rates.second
     );

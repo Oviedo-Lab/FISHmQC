@@ -62,7 +62,7 @@ NULL
 #   # Grab MERSCOPE codebook 
 #   # ... provide your own codebook, or use the sample one
 #   codebook <- read.csv("codebook_obs.csv", row.names = 1)
-# }
+}
 
 
 
@@ -1700,7 +1700,7 @@ plot_MCMC_steps <- function(
 #   FR_search = 1000
 #   )
 
-#remake_plots <- function() {
+remake_plots <- function() {
   files <- list.files(pattern = "\\.rds$", full.names = TRUE)
   rds_list <- lapply(files, readRDS)
   burnin <- 1000
