@@ -184,7 +184,7 @@ double expected_misreads(
       // Get flips needed to transform bct into bc 
       uint64_t flips = transform_flips_all(i, k);
       // Find transform rate, assuming independent bit flips, so multiply across bits
-      double transform_rate = TR(bct, flips, rate10, rate01); // PROBLEM: the flips for this i might be incompatible with the flips from a previous i
+      double transform_rate = TR(bct, flips, rate10, rate01); 
       misread_count += transform_rate * (double)bc_counts_true[i];
     }
     return misread_count;
@@ -197,14 +197,15 @@ double expected_miscorrections(
     const std::vector<double>& rate01,            // bit-flip rates, P(0 -> 1) for each bit, so length = N_bits
     const std::vector<int>& bc_counts_true,       // Vector of same length as true_barcodes, giving number of spots with each true barcode
     const std::vector<uint64_t>& true_barcodes,   // Vector giving all possible true spot barcodes
-    const std::vector<uint64_t>& corrected_to_k   // vector of barcodes that would be corrected to barcode indexed by k
+    const std::vector<uint64_t>& corrected_to_k,   // vector of barcodes that would be corrected to barcode indexed by k
+    const int max_Hamming
   ) {
     int N_bits = rate10.size();
     double misread_count = 0.0;
     // For each possible barcode misread that would be corrected to the barcode indexed by k ...
     for (uint64_t bcr : corrected_to_k) {
       // Get bit-flips required to transform each true barcode into this misread barcode
-      std::vector<uint64_t> transform_flips = find_transform_flips(true_barcodes, bcr, N_bits); // Precomputing this step not worth the memory (tried it!!)
+      std::vector<uint64_t> transform_flips = find_transform_flips(true_barcodes, bcr, N_bits); // Precomputing this step not worth the memory (tried it!!);
       for (int i = 0; i < true_barcodes.size(); ++i) {
         if (i == k) {continue;} // Skip true barcode, since we want misreads
         // Get barcode of interest
@@ -212,7 +213,9 @@ double expected_miscorrections(
         // Get flips needed to transform bct into bcr 
         uint64_t flips = transform_flips[i];
         // Find transform rate, assuming independent bit flips, so multiply across bits
-        double transform_rate = TR(bct, flips, rate10, rate01); // PROBLEM: Same as above; flips will be incompatable. 
+        double transform_rate = 0.0;
+        // ... if number of flips is greater than max_Hamming, the transformation is effectively impossible
+        if (__builtin_popcountll(flips) <= max_Hamming) {transform_rate = TR(bct, flips, rate10, rate01);}
         // Find expected count of spot misreads corrected to barcode k, from true barcode i, and add to total misread count
         misread_count += transform_rate * (double)bc_counts_true[i];
       }
@@ -231,11 +234,13 @@ std::vector<double> expected_corrected_counts(
   ) {
     int N_barcodes = true_barcodes.size();
     std::vector<double> expected_counts(N_barcodes);
+    int max_count = *std::max_element(bc_counts_true.begin(), bc_counts_true.end());
+    int max_Hamming = static_cast<int>(std::floor(1.0 + std::log2(max_count))) + 1;
     for (int k = 0; k < N_barcodes; ++k) {
       expected_counts[k] = 
         expected_preserved_spots(true_barcodes[k], rate10, rate01, bc_counts_true[k]) + 
         expected_misreads(k, rate10, rate01, bc_counts_true, true_barcodes, transform_flips_all) + 
-        expected_miscorrections(k, rate10, rate01, bc_counts_true, true_barcodes, correction_table_inverted.at(k));
+        expected_miscorrections(k, rate10, rate01, bc_counts_true, true_barcodes, correction_table_inverted.at(k), max_Hamming);
     }
     return expected_counts;
   }

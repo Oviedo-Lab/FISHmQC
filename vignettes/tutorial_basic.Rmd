@@ -15,7 +15,12 @@ library(FISHmQC)
 Grab MERSCOPE codebook. Must have row names in the first column giving species names. 
 
 ```{r get_codebook}
-codebook <- read.csv("/Users/michaelbarkasi/projects_Oviedo_lab/R_packages/FISHmQC/inst/extdata/codebook_obs.csv", row.names = 1)
+file_path <- system.file(
+  "extdata",
+  "codebook_obs.csv",
+  package = "FISHmQC"
+)
+codebook <- read.csv(file_path, row.names = 1)
 ```
 
 Some text here. 
@@ -60,7 +65,13 @@ write.csv(
 ```
 
 ```{r align_names}
-summary_stats_data <- read.csv("/Users/michaelbarkasi/projects_Oviedo_lab/R_packages/FISHmQC/inst/extdata/summary_stats_all_mice.csv", row.names = 1)
+file_path <- system.file(
+  "extdata",
+  "summary_stats_all_mice.csv",
+  package = "FISHmQC"
+)
+summary_stats_data <- read.csv(file_path, row.names = 1)
+
 m1_summary_stats <- summary_stats_data[summary_stats_data$mouse == 1,]
 
 species_names <- rownames(m1_summary_stats)
