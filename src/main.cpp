@@ -31,23 +31,19 @@ struct FlipRates {
 }; 
 
 struct SpotSim {
-  std::vector<uint64_t> barcodes_true;
-  std::vector<uint64_t> barcodes_read; 
-  std::vector<uint64_t> barcodes_corrected;
+  // Spot labels: ground truth, simulated value read, simulated value corrected
   std::vector<int> labels_true;
   std::vector<int> labels_read;
   std::vector<int> labels_corrected;
-  std::vector<int> cell_ids;
-  std::vector<VectorXd> lum;
-  std::vector<double> rate01_pre;
-  std::vector<double> rate10_pre;
-  std::vector<double> rate01_post;
-  std::vector<double> rate10_post;
+  // For each barcode, the total number of spots read as that barcode, corrected to that barcode, and correctly read as that barcode
   std::vector<int> read_counts;
   std::vector<int> corrected_counts;
   std::vector<int> true_counts;
+  // Confidence ratio and positive precision value
   std::vector<double> CR;
   std::vector<double> PPV;
+  // Negative log likelihood of observed barcode counts used to seed simulation, using simulated corrected counts as expected counts in Gamma-Poisson likelihood
+  double nll;
 };
 
 MatrixXd rmvnorm(
@@ -205,7 +201,9 @@ double expected_miscorrections(
     // For each possible barcode misread that would be corrected to the barcode indexed by k ...
     for (uint64_t bcr : corrected_to_k) {
       // Get bit-flips required to transform each true barcode into this misread barcode
-      std::vector<uint64_t> transform_flips = find_transform_flips(true_barcodes, bcr, N_bits); // Precomputing this step not worth the memory (tried it!!);
+      std::vector<uint64_t> transform_flips = find_transform_flips(true_barcodes, bcr, N_bits); 
+      // ^ ... Precomputing this step not worth the memory (tried it!!);
+      //   ... although, if precomputed, could be organized by hamming distance, then pruned down (to shrink the unordered map)
       for (int i = 0; i < true_barcodes.size(); ++i) {
         if (i == k) {continue;} // Skip true barcode, since we want misreads
         // Get barcode of interest
@@ -251,7 +249,7 @@ std::vector<double> expected_corrected_counts(
 // Ignore over-dispersion for now, and handle that in the DG simulations??
 // Use this as initial values for the flip rates, and set correlations of flip rates as zero to start. 
 
-double observed_counts_nll(
+double observed_counts_nll_analytic(
     const std::vector<double>& rates, 
     std::vector<double>& grad,
     void* data                    
@@ -301,6 +299,14 @@ double observed_counts_nll(
     return nll;
   }
 
+double observed_counts_nll_by_sim(
+    const std::vector<double>& rates_plus_corr, 
+    std::vector<double>& grad,
+    void* data                    
+  ) {
+   // Instead of just running sim once to get predicted values, why not run it multiple times and average??
+  }
+
 // Optimize rate10 and rate01 to minimize distance between expected_corrected_counts and observed_barcodes
 std::pair<std::vector<double>, std::vector<double>> estimate_flip_rates_initial(
     ST_data& STdata,
@@ -317,7 +323,7 @@ std::pair<std::vector<double>, std::vector<double>> estimate_flip_rates_initial(
     
     // Set up NLopt optimizer
     nlopt::opt opt(nlopt::LN_SBPLX, n); 
-    opt.set_min_objective(observed_counts_nll, &STdata);
+    opt.set_min_objective(observed_counts_nll_analytic, &STdata);
     opt.set_ftol_rel(ctol);       // stop when iteration changes objective fn value by less than this fraction 
     opt.set_maxeval(max_evals);   // Maximum number of evaluations to try
     // ... add bounds 
@@ -344,7 +350,6 @@ std::pair<std::vector<double>, std::vector<double>> estimate_flip_rates_initial(
     std::vector<double> rate01(rates.begin() + N_bits, rates.end());
     return {rate10, rate01};
   }
-
 
 /*
  * Next up: remake the set_true_spot_info and generate_simulated_spots functions; 
@@ -460,33 +465,81 @@ MatrixXi make_true_bc_counts(
     return barcode_counts_true;
   }
 
+// Integral of Poisson-Gamma distribution, from 0 to positive infinity
+// ... taken from the wispack code
+double poisson_gamma_integral(
+    double y, // observed count value
+    double r, // expected process rate drawn from the gamma distribution
+    double v  // variance of the gamma distribution
+  ) {
+   
+    // convert more intuitive rate and variance parameters into the standard shape-rate parameters 
+    // ... for the gamma distribution
+    double s = r * r / v; // Gamma distribution "shape" parameter
+    double R = s / r;     // Gamma distribution "rate" parameter
+    
+    // Idea: This is an analytic solution to the integral of dPois(y, lambda) * dGamma(lambda, r, v) from 0 to positive infinity. 
+    //        ... The solution takes the form of a ratio num/denom which is subject to overflow/underflow, and so instead of 
+    //            computing this ratio directly, we compute the log of the numerator and denominator separately, and then exponentiate the difference.
+    double log_num = s * std::log(R) + std::lgamma(y + s); 
+    double log_denom = std::lgamma(y + 1.0) + std::lgamma(s) + (y + s) * std::log(R + 1.0);
+    double integral = std::exp(log_num - log_denom);
+   
+    // note: this return value is *not* the log of the density! It's the density itself. 
+    return integral;
+    
+  }
+
+// Formula to calculate gamme dispersion factor from mean and variance of counts
+// ... taken from the wispack code
+double compute_gamma_dispersion(
+    const double& count_mean, // mean of counts for context-species combination
+    const double& count_var   // variance of counts for context-species combination
+  ) {
+    
+    if (count_var > count_mean) {
+      // Have: count_var = count_mean + count_mean^2 * gdis
+      // ... count_var = count_mean * (1 + count_mean * gdis)
+      // ... count_var / count_mean = 1 + count_mean * gdis
+      // ... (count_var / count_mean) - 1 = count_mean * gdis
+      return ((count_var / count_mean) - 1.0) / count_mean;
+    } else {
+      return 0.0; // no dispersion if variance is less than or equal to mean
+    }
+  }
+
 SpotSim make_SpotSim(
-    const MatrixXi& bc_counts, // random draw seeded by empirical observation, e.g., a MERFISH run
+    int N_cells, // Number of cells to simulate
+    const std::vector<double>& bc_rates, // Expected count, per cell
+    const std::vector<double>& bc_variance, // Expected variance in count, among cells
     const Codebook& cb, 
     const FlipRates& fr, 
     const std::unordered_map<uint64_t, int>& correction_table
   ) {
     
-    // Collect basic information
-    int total_spots = bc_counts.sum();
-    int N_barcodes = bc_counts.cols();
-    int N_cells = bc_counts.rows();
+    // Get number of bits and number of barcodes from codebook
+    int N_barcodes = cb.barcodes.size();
     int N_bits = cb.N_bits;
+   
+    // Make bc_counts vector 
+    std::vector<int> bc_counts(N_barcodes, 0);
+    std::vector<double> bc_dispersion(N_barcodes, 0.0);
+    int total_spots = 0;
+    for (int i = 0; i < N_barcodes; ++i) {
+      bc_counts[i] = (int)std::round(bc_rates[i] * (int)N_cells);
+      bc_dispersion[i] = compute_gamma_dispersion(bc_rates[i], bc_variance[i]);
+      total_spots += bc_counts[i];
+    }
     
     // Initialize spot sim
     SpotSim sim;
     
-    // Reserve space for barcodes and labels
-    sim.barcodes_true.reserve(total_spots);
-    sim.barcodes_read.reserve(total_spots);
-    sim.barcodes_corrected.reserve(total_spots);
+    // Reserve space for labels
     sim.labels_true.reserve(total_spots);
     sim.labels_read.reserve(total_spots);
     sim.labels_corrected.reserve(total_spots);
-    sim.cell_ids.reserve(total_spots);
-    sim.lum.reserve(total_spots);
     
-    // Compute inverse of flip rates using normal-distribution quantiles (inverse CDF)
+    // Compute inverse of target flip rates using normal-distribution quantiles (inverse CDF)
     std::vector<double> rate10_inv(N_bits);
     std::vector<double> rate01_inv(N_bits);
     for (int b = 0; b < N_bits; ++b) {
@@ -514,8 +567,8 @@ SpotSim make_SpotSim(
     
     // For each barcode ...
     for (int j = 0; j < N_barcodes; j++) {
-      // ... make spots for all cells in one pass
-      int count = bc_counts.col(j).sum();
+      // ... make spots (of barcode j) for all cells in one pass
+      int count = bc_counts[j];
       
       if (count >= 1) {
         // Build noise diagonal matrix
@@ -527,66 +580,45 @@ SpotSim make_SpotSim(
         // Sample luminance levels from multivariate normal 
         MatrixXd lum = rmvnorm(count, bit_means.row(j).transpose(), corr_noised);
         
-        // For each cell ...
-        for (int i = 0; i < N_cells; ++i) {
+        // Simulate the spots for this barcode
+        for (int k = 0; k < count; ++k) {
           
-          // ... simulate the number of spots for this barcode
-          int bc_count = bc_counts(i, j); 
-          for (int k = 0; k < bc_count; ++k) {
-            
-            // Grab spot and decode 
-            VectorXd spot = lum.row(i*bc_count + k).transpose();
-            uint64_t spot_bc = pack_decode_lum(spot);
-            uint64_t spot_bc_corrected = spot_bc;
-            int label_corrected;
-            int label_read = -1;
-            
-            // Correct decoding
-            auto it = correction_table.find(spot_bc);
-            if (it == correction_table.end()) {
-              label_corrected = -1; // uncorrectable
-            } else {
-              label_corrected = it->second;
-            }
-            
-            if (label_corrected >= 0) {
-              spot_bc_corrected = cb.barcodes[label_corrected];
-              if (spot_bc_corrected == spot_bc) {
-                label_read = label_corrected;
-              }
-            }
-            
-            // Save cell ID and spot-luminance information
-            sim.cell_ids.push_back(i);
-            sim.lum.push_back(spot);
-            
-            // Save labels 
-            sim.labels_true.push_back(j);
-            sim.labels_read.push_back(label_read);
-            sim.labels_corrected.push_back(label_corrected);
-            
-            // Savd barcodes
-            sim.barcodes_true.push_back(cb.barcodes[j]);
-            sim.barcodes_read.push_back(spot_bc);
-            sim.barcodes_corrected.push_back(spot_bc_corrected);
+          // Grab spot and decode 
+          VectorXd spot = lum.row(k).transpose();
+          uint64_t spot_bc = pack_decode_lum(spot);
+          uint64_t spot_bc_corrected = spot_bc;
+          int label_corrected;
+          int label_read = -1;
+          
+          // Correct decoded label
+          auto it = correction_table.find(spot_bc);
+          if (it == correction_table.end()) {
+            label_corrected = -1; // uncorrectable
+          } else {
+            label_corrected = it->second;
           }
+          // ... and correct decoded barcode
+          if (label_corrected >= 0) {
+            spot_bc_corrected = cb.barcodes[label_corrected];
+            if (spot_bc_corrected == spot_bc) {
+              label_read = label_corrected;
+            }
+          }
+          
+          // Save labels 
+          sim.labels_true.push_back(j);
+          sim.labels_read.push_back(label_read);
+          sim.labels_corrected.push_back(label_corrected);
+          
         }
       }
     }
-    
-    // Compute flip rates pre- and post-correction
-    std::pair<std::vector<double>, std::vector<double>> fr_pre = compute_flip_rates(sim.barcodes_true, sim.barcodes_read, N_bits);
-    std::pair<std::vector<double>, std::vector<double>> fr_post = compute_flip_rates(sim.barcodes_true, sim.barcodes_corrected, N_bits);
-    sim.rate01_pre = fr_pre.first;
-    sim.rate10_pre = fr_pre.second;
-    sim.rate01_post = fr_post.first;
-    sim.rate10_post = fr_post.second;
     
     // Count barcodes
     std::vector<int> read_counts(N_barcodes, 0);
     std::vector<int> corrected_counts(N_barcodes, 0);
     std::vector<int> true_counts(N_barcodes, 0);
-    for (size_t i = 0; i < sim.labels_corrected.size(); ++i) {
+    for (size_t i = 0; i < total_spots; ++i) {
       int dc = sim.labels_read[i];
       if (dc >= 0) {++read_counts[dc];}
       int cc = sim.labels_corrected[i];
@@ -598,6 +630,16 @@ SpotSim make_SpotSim(
     sim.corrected_counts = corrected_counts;
     sim.true_counts = true_counts;
     
+    // Compute negative log likelihood of bc_counts, given corrected_counts as predicted counts
+    double log_lik = 0.0;
+    for (int i = 0; i < N_barcodes; ++i) {
+      double obs_rate = bc_rates[i];
+      double pred_rates = (double)corrected_counts[i] / (double)N_cells;
+      double gamma_variance = pred_rates + bc_dispersion[i] * pred_rates * pred_rates;
+      log_lik += std::log(poisson_gamma_integral(obs_rate, pred_rates, gamma_variance));
+    }
+    double nll = -log_lik;
+    
     // Compute CR and PPV
     std::vector<double> CR(N_barcodes, 0.0);
     std::vector<double> PPV(N_barcodes, 0.0);
@@ -607,6 +649,7 @@ SpotSim make_SpotSim(
     }
     sim.CR = CR;
     sim.PPV = PPV;
+    sim.nll = nll;
     
     return sim;
   }
