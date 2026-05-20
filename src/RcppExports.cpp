@@ -12,21 +12,24 @@ Rcpp::Rostream<false>& Rcpp::Rcerr = Rcpp::Rcpp_cerr_get();
 #endif
 
 // mQC
-List mQC(NumericMatrix bc_counts, IntegerMatrix codebook, int max_correctable_Hamming_distance);
-RcppExport SEXP _FISHmQC_mQC(SEXP bc_countsSEXP, SEXP codebookSEXP, SEXP max_correctable_Hamming_distanceSEXP) {
+List mQC(NumericMatrix bc_counts, IntegerMatrix codebook, int max_correctable_Hamming_distance, double ctol, int max_evals, int n_resamples);
+RcppExport SEXP _FISHmQC_mQC(SEXP bc_countsSEXP, SEXP codebookSEXP, SEXP max_correctable_Hamming_distanceSEXP, SEXP ctolSEXP, SEXP max_evalsSEXP, SEXP n_resamplesSEXP) {
 BEGIN_RCPP
     Rcpp::RObject rcpp_result_gen;
     Rcpp::RNGScope rcpp_rngScope_gen;
     Rcpp::traits::input_parameter< NumericMatrix >::type bc_counts(bc_countsSEXP);
     Rcpp::traits::input_parameter< IntegerMatrix >::type codebook(codebookSEXP);
     Rcpp::traits::input_parameter< int >::type max_correctable_Hamming_distance(max_correctable_Hamming_distanceSEXP);
-    rcpp_result_gen = Rcpp::wrap(mQC(bc_counts, codebook, max_correctable_Hamming_distance));
+    Rcpp::traits::input_parameter< double >::type ctol(ctolSEXP);
+    Rcpp::traits::input_parameter< int >::type max_evals(max_evalsSEXP);
+    Rcpp::traits::input_parameter< int >::type n_resamples(n_resamplesSEXP);
+    rcpp_result_gen = Rcpp::wrap(mQC(bc_counts, codebook, max_correctable_Hamming_distance, ctol, max_evals, n_resamples));
     return rcpp_result_gen;
 END_RCPP
 }
 
 static const R_CallMethodDef CallEntries[] = {
-    {"_FISHmQC_mQC", (DL_FUNC) &_FISHmQC_mQC, 3},
+    {"_FISHmQC_mQC", (DL_FUNC) &_FISHmQC_mQC, 6},
     {NULL, NULL, 0}
 };
 
