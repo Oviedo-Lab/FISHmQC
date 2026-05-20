@@ -12,12 +12,12 @@ Rcpp::Rostream<false>& Rcpp::Rcerr = Rcpp::Rcpp_cerr_get();
 #endif
 
 // mQC
-List mQC(NumericVector bc_counts, IntegerMatrix codebook, int max_correctable_Hamming_distance);
+List mQC(NumericMatrix bc_counts, IntegerMatrix codebook, int max_correctable_Hamming_distance);
 RcppExport SEXP _FISHmQC_mQC(SEXP bc_countsSEXP, SEXP codebookSEXP, SEXP max_correctable_Hamming_distanceSEXP) {
 BEGIN_RCPP
     Rcpp::RObject rcpp_result_gen;
     Rcpp::RNGScope rcpp_rngScope_gen;
-    Rcpp::traits::input_parameter< NumericVector >::type bc_counts(bc_countsSEXP);
+    Rcpp::traits::input_parameter< NumericMatrix >::type bc_counts(bc_countsSEXP);
     Rcpp::traits::input_parameter< IntegerMatrix >::type codebook(codebookSEXP);
     Rcpp::traits::input_parameter< int >::type max_correctable_Hamming_distance(max_correctable_Hamming_distanceSEXP);
     rcpp_result_gen = Rcpp::wrap(mQC(bc_counts, codebook, max_correctable_Hamming_distance));

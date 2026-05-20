@@ -26,7 +26,7 @@ codebook <- read.csv(file_path, row.names = 1)
 Some text here. 
 
 ```{r set_max_Hamming}
-max_correctable_Hamming_distance <- 4
+max_correctable_Hamming_distance <- 3
 ```
 
 Get summary stats 
@@ -94,14 +94,14 @@ plot(m1_summary_stats$rates)
 Now try new function. 
 
 ```{r new_initial_estimate}
-bc_counts <- m1_summary_stats$counts
-names(bc_counts) <- rownames(m1_summary_stats)
+bc_counts <- as.matrix(m1_summary_stats[,c("rates", "variance", "counts")])
+rownames(bc_counts) <- rownames(m1_summary_stats)
 cb <- as.matrix(codebook)
 test_results <- mQC(bc_counts, cb, max_correctable_Hamming_distance)
 ```
 
 ```{r plot_results}
-plot_df <- data.frame(observed = test_results$counts_provided, predicted = test_results$counts_expected_initial, bc = seq_along(bc_counts))
+plot_df <- data.frame(observed = test_results$counts_provided[,"counts"], predicted = test_results$counts_expected_initial, bc = seq_len(nrow(bc_counts)))
 ggplot(plot_df, aes(x = bc)) + 
   geom_point(aes(y = observed), color = "blue") + 
   geom_point(aes(y = predicted), color = "red") + 
