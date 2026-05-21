@@ -100,8 +100,9 @@ test_results <- mQC(
   bc_counts, 
   cb, 
   max_correctable_Hamming_distance,
-  1e-7,
-  1000,
+  0.3,
+  1e-4,
+  300,
   100
   )
 ```
@@ -119,5 +120,5 @@ ggplot(plot_df, aes(x = bc)) +
   scale_y_log10() +
   labs(title = "Observed vs Predicted Counts", x = "Barcode Index", y = "Counts") + 
   theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
-
+hist(test_results[["nll_sim"]])
 ```

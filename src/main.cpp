@@ -733,6 +733,43 @@ MatrixXd make_corr_matrix(
     return corr;
   }
 
+std::pair<std::vector<int>, std::vector<double>> make_ground_truth_counts(
+    int N_cells, 
+    const ST_data& STdata,
+    const FlipRates& fr
+  ) {
+    // Extract ST data
+    Codebook cb = STdata.cb;
+    std::vector<double> bc_rates = STdata.bc_rates;
+    std::vector<double> bc_variance = STdata.bc_variance;
+    int N_barcodes = cb.barcodes.size();
+    int N_bits = cb.N_bits;
+    int max_correctable_Hamming_distance = STdata.max_correctable_Hamming_distance;
+    // ... find expected decoding rate
+    double mean_Hamming_weight = 0.0; 
+    for (int i = 0; i < N_barcodes; ++i) {mean_Hamming_weight += (double)__builtin_popcountll(cb.barcodes[i]);}
+    mean_Hamming_weight /= (double)N_barcodes;
+    double mean_rate10 = std::accumulate(fr.rate10.begin(), fr.rate10.end(), 0.0);
+    mean_rate10 /= (double)N_bits;
+    double mean_rate01 = std::accumulate(fr.rate01.begin(), fr.rate01.end(), 0.0);
+    mean_rate01 /= (double)N_bits;
+    double expected_flip_rate = (mean_rate10*mean_Hamming_weight + mean_rate01*((double)N_bits - mean_Hamming_weight)) / (double)N_bits;
+    double expected_decoding_rate = R::ppois(max_correctable_Hamming_distance, expected_flip_rate * (double)N_bits, true, false);
+    // ... make bc_counts and bc_dispersion vectors
+    std::vector<int> bc_counts(N_barcodes, 0);
+    std::vector<double> bc_dispersion(N_barcodes, 0.0);
+    double N_cells_adjusted = (double)N_cells / expected_decoding_rate;
+    for (int i = 0; i < N_barcodes; ++i) {
+      bc_counts[i] = (int)std::round(bc_rates[i] * N_cells_adjusted);
+      bc_dispersion[i] = compute_gamma_dispersion(bc_rates[i], bc_variance[i]);
+    }
+    // ... Set blanks to zero
+    for (int idx : cb.blanks) {
+      bc_counts[idx] = 0;
+    }
+    return {bc_counts, bc_dispersion};
+  }
+
 double observed_counts_nll_by_sim(
     const std::vector<double>& rates_plus_corr, 
     std::vector<double>& grad,
@@ -769,37 +806,18 @@ double observed_counts_nll_by_sim(
       N_bits
     );
     
-    // Extract simulation hyperparameters 
-    // ... MAKE function to extract hyperparameters from cb and fr structures? 
-    // ... find expected decoding rate
-    double mean_Hamming_weight = 0.0; 
-    for (int i = 0; i < N_barcodes; ++i) {mean_Hamming_weight += (double)__builtin_popcountll(cb.barcodes[i]);}
-    mean_Hamming_weight /= (double)N_barcodes;
-    double mean_rate10 = std::accumulate(fr.rate10.begin(), fr.rate10.end(), 0.0);
-    mean_rate10 /= (double)N_bits;
-    double mean_rate01 = std::accumulate(fr.rate01.begin(), fr.rate01.end(), 0.0);
-    mean_rate01 /= (double)N_bits;
-    double expected_flip_rate = (mean_rate10*mean_Hamming_weight + mean_rate01*((double)N_bits - mean_Hamming_weight)) / (double)N_bits;
-    double expected_decoding_rate = R::ppois(max_correctable_Hamming_distance, expected_flip_rate * (double)N_bits, true, false);
-    // ... make bc_counts vector 
-    std::vector<int> bc_counts(N_barcodes, 0);
-    std::vector<double> bc_dispersion(N_barcodes, 0.0);
-    double N_cells_adjusted = (double)N_cells / expected_decoding_rate;
-    for (int i = 0; i < N_barcodes; ++i) {
-      bc_counts[i] = (int)std::round(bc_rates[i] * N_cells_adjusted);
-      bc_dispersion[i] = compute_gamma_dispersion(bc_rates[i], bc_variance[i]);
-    }
-    // ... Set blanks to zero
-    for (int idx : cb.blanks) {
-      bc_counts[idx] = 0;
-    }
+    // Extract simulated ground-truth counts and dispersion
+    const auto& gtc =  make_ground_truth_counts(N_cells, *d, fr);
+    std::vector<int> bc_counts = gtc.first;
+    std::vector<double> bc_dispersion = gtc.second;
    
     // Compute nll of observed data given these rates, with a simulation 
     int n_reruns = 4;
     double nll = 0.0;
+    SpotSim sim;
     for (int i = 0; i < n_reruns; ++i) {
       // Run simulation with these rates
-      SpotSim sim = make_SpotSim(bc_counts, cb, fr, correction_table);
+      sim = make_SpotSim(bc_counts, cb, fr, correction_table);
       // Compute nll 
       nll += compute_sim_nll(N_cells, bc_rates, bc_dispersion, sim.corrected_counts);
     }
@@ -821,6 +839,7 @@ using ObjectiveFn = double (*)(
 FlipRates estimate_flip_rates(
     ST_data& STdata,
     ObjectiveFn fn,
+    double max_fr = 0.25,
     double ctol = 1e-7,
     int max_evals = 500
   ) {
@@ -834,13 +853,13 @@ FlipRates estimate_flip_rates(
     std::vector<double> rates_plus_corr(n, 0.05); // First N_bits are rate10, second N_bits are rate01, rest of bits are corr matrix
     
     // Set up NLopt optimizer
-    nlopt::opt opt(nlopt::LN_COBYLA, n); 
+    nlopt::opt opt(nlopt::GN_CRS2_LM, n); // LN_COBYLA, LN_NELDERMEAD, LN_SBPLX, LN_PRAXIS, GN_ESCH, GN_ISRES, GN_CRS2_LM, GN_DIRECT
     opt.set_min_objective(fn, &STdata);
     opt.set_ftol_rel(ctol);       // stop when iteration changes objective fn value by less than this fraction 
     opt.set_maxeval(max_evals);   // Maximum number of evaluations to try
     // ... add bounds 
     std::vector<double> lb(n, 0.0);
-    std::vector<double> ub(n, 0.2); // Max flip rate of 20% seems reasonable; can adjust if needed
+    std::vector<double> ub(n, max_fr); 
     for (int i = 2*N_bits; i < n; ++i) {
       lb[i] = -1.0; // Correlations can be negative
       ub[i] = 1.0;  // Correlations can be positive
@@ -943,6 +962,7 @@ List mQC(
     NumericMatrix bc_counts,
     IntegerMatrix codebook,
     int max_correctable_Hamming_distance,
+    double max_fr = 0.25,
     double ctol = 1e-7,
     int max_evals = 500,
     int n_resamples = 100
@@ -952,30 +972,39 @@ List mQC(
     auto STdata = load_STdata(bc_counts, codebook, max_correctable_Hamming_distance);
    
     // Make initial estimate of flip rates, assuming no correlations or over-dispersion, to use as starting point for DG simulations
-    auto flip_rates = estimate_flip_rates(
+    auto fr = estimate_flip_rates(
       STdata, 
       observed_counts_nll_by_sim,
+      max_fr,
       ctol,
       max_evals 
     );
     
-    // Compute final predicted rates based on initial estimate
-    // Compute number of cells needed for a transcript count of 10 for the least abundant barcode
+    // Compute CR and PPV values via simulation with these flip rates
     int N_cells = (int)std::round(10.0 / *std::min_element(STdata.bc_rates.begin(), STdata.bc_rates.end()));
     NumericVector counts_simulated = NumericVector(STdata.bc_rates.begin(), STdata.bc_rates.end()) * (double)N_cells;
-    
     SpotSim sim;
     NumericMatrix corrected_counts_sim(n_resamples, STdata.cb.barcodes.size());
     NumericMatrix CR_sim(n_resamples, STdata.cb.barcodes.size());
     NumericMatrix PPV_sim(n_resamples, STdata.cb.barcodes.size());
     NumericVector nll_sim(n_resamples);
+    // Extract simulated ground-truth counts and dispersion
+    const auto& gtc =  make_ground_truth_counts(N_cells, STdata, fr);
+    std::vector<int> bc_counts_true = gtc.first;
+    std::vector<double> bc_dispersion = gtc.second;
+    std::vector<double> CR;
+    std::vector<double> PPV;
+    std::pair<std::vector<double>, std::vector<double>> CRPPV;
     for (int i = 0; i < n_resamples; ++i) {
       // Run simulation with these rates
-      sim = make_SpotSim(bc_counts_true, STdata.cb, flip_rates, STdata.correction_table);
+      sim = make_SpotSim(bc_counts_true, STdata.cb, fr, STdata.correction_table);
+      CRPPV = compute_CRPPV(sim);
+      CR = CRPPV.first;
+      PPV = CRPPV.second;
       corrected_counts_sim.row(i) = NumericVector(sim.corrected_counts.begin(), sim.corrected_counts.end());
-      CR_sim.row(i) = NumericVector(sim.CR.begin(), sim.CR.end());
-      PPV_sim.row(i) = NumericVector(sim.PPV.begin(), sim.PPV.end());
-      nll_sim[i] = sim.nll;
+      CR_sim.row(i) = NumericVector(CR.begin(), CR.end());
+      PPV_sim.row(i) = NumericVector(PPV.begin(), PPV.end());
+      nll_sim[i] = compute_sim_nll(N_cells, STdata.bc_rates, bc_dispersion, sim.corrected_counts);
     }
     
     return List::create(
@@ -985,8 +1014,8 @@ List mQC(
       _["CR_sim"] = CR_sim,
       _["PPV_sim"] = PPV_sim,
       _["nll_sim"] = nll_sim,
-      _["rate10"] = flip_rates.rate10,
-      _["rate01"] = flip_rates.rate01,
-      _["corr"] = flip_rates.corr
+      _["rate10"] = fr.rate10,
+      _["rate01"] = fr.rate01,
+      _["corr"] = fr.corr
     );
   }
